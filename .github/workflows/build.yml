@@ -1,0 +1,74 @@
+
+name: ShopKey APK Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'index.html'
+      - '.github/workflows/build.yml'
+
+jobs:
+  build:
+    name: Build ShopKey Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Capacitor
+        run: |
+          npm init -y
+          npm install @capacitor/core@7 @capacitor/android@7
+          npm install -D @capacitor/cli@7
+
+      - name: Prepare ShopKey App
+        run: |
+          mkdir -p www
+          cp index.html www/index.html
+
+          cat > capacitor.config.json <<'EOF'
+          {
+            "appId": "com.shopkey.app",
+            "appName": "ShopKey",
+            "webDir": "www",
+            "bundledWebRuntime": false
+          }
+          EOF
+
+      - name: Generate Android Project
+        run: |
+          npx cap add android
+          npx cap sync android
+
+      - name: Build Debug APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Upload ShopKey APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShopKey-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+          
