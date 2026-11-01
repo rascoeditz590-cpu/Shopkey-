@@ -1,129 +1,133 @@
-
-name: ShopKey Android APK
+name: Build Shopkey APK
 
 on:
-  workflow_dispatch:
   push:
     branches: [main]
-    paths:
-      - 'index.html'
-      - 'shopkey-logo.png'
-      - '.github/workflows/build.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build ShopKey
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      APP_NAME: Shopkey
+      APP_ID: com.shopkey.app
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Check required files
+        run: |
+          for f in www/index.html assets/icon-only.png assets/icon-foreground.png assets/splash.png; do
+            if [ ! -f "$f" ]; then
+              echo "::error::Missing file: $f"
+              exit 1
+            fi
+          done
+
+      - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - name: Setup Java
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: 21
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Check App Files
+      - name: Create Capacitor project
         run: |
-          test -f index.html
-          test -f shopkey-logo.png
-
-      - name: Install Capacitor
-        run: |
-          npm init -y
-          npm install @capacitor/core@7.4.3 @capacitor/android@7.4.3
-          npm install --save-dev @capacitor/cli@7.4.3
-
-      - name: Configure ShopKey
-        run: |
-          mkdir -p www
-          cp index.html www/index.html
-
-          cat > capacitor.config.json <<'EOF'
+          [ -f package.json ] || npm init -y
+          npm install @capacitor/core @capacitor/cli @capacitor/android
+          npm install -D @capacitor/assets
+          cat > capacitor.config.json <<EOF
           {
-            "appId": "com.shopkey.app",
-            "appName": "ShopKey",
+            "appId": "$APP_ID",
+            "appName": "$APP_NAME",
             "webDir": "www"
           }
           EOF
 
-      - name: Create Android Project
+      - name: Add Android platform
+        run: npx cap add android
+
+      - name: Generate Shopkey icons and splash (replaces default logo)
         run: |
-          npx cap add android
-          npx cap sync android
+          npx capacitor-assets generate --android \
+            --iconBackgroundColor '#0F766E' \
+            --iconBackgroundColorDark '#0F766E' \
+            --splashBackgroundColor '#FFFFFF' \
+            --splashBackgroundColorDark '#0F766E'
 
-      - name: Apply ShopKey Branding
+      - name: Sync web files
+        run: npx cap sync android
+
+      - name: Force app name and version
         run: |
-          RES=android/app/src/main/res
+          STR=android/app/src/main/res/values/strings.xml
+          sed -i "s|<string name=\"app_name\">[^<]*</string>|<string name=\"app_name\">$APP_NAME</string>|" "$STR"
+          sed -i "s|<string name=\"title_activity_main\">[^<]*</string>|<string name=\"title_activity_main\">$APP_NAME</string>|" "$STR"
+          sed -i "s/versionCode 1/versionCode ${{ github.run_number }}/; s/versionName \"1.0\"/versionName \"1.0.${{ github.run_number }}\"/" android/app/build.gradle
+          cat "$STR"
 
-          mkdir -p $RES/drawable-nodpi
-          mkdir -p $RES/mipmap-mdpi
-          mkdir -p $RES/mipmap-hdpi
-          mkdir -p $RES/mipmap-xhdpi
-          mkdir -p $RES/mipmap-xxhdpi
-          mkdir -p $RES/mipmap-xxxhdpi
-          mkdir -p $RES/mipmap-anydpi-v26
-
-          convert shopkey-logo.png -resize 432x432! \
-            $RES/drawable-nodpi/ic_launcher_foreground.png
-
-          for item in "mdpi 48" "hdpi 72" "xhdpi 96" \
-            "xxhdpi 144" "xxxhdpi 192"; do
-            set -- $item
-            convert shopkey-logo.png -resize "$2"x"$2"! \
-              "$RES/mipmap-$1/ic_launcher.png"
-            cp "$RES/mipmap-$1/ic_launcher.png" \
-              "$RES/mipmap-$1/ic_launcher_round.png"
-          done
-
-          cat > $RES/values/shopkey_icon.xml <<'EOF'
-          <resources>
-            <color name="shopkey_icon_bg">#0F766E</color>
-          </resources>
-          EOF
-
-          for icon in ic_launcher ic_launcher_round; do
-            cat > "$RES/mipmap-anydpi-v26/$icon.xml" <<EOF
-          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-            <background android:drawable="@color/shopkey_icon_bg"/>
-            <foreground android:drawable="@drawable/ic_launcher_foreground"/>
-          </adaptive-icon>
-          EOF
-          done
-
-          sed -i 's/<string name="app_name">[^<]*</<string name="app_name">ShopKey</' \
-            $RES/values/strings.xml
-
-      - name: Build ShopKey APK
+      - name: Build release APK (unsigned)
+        working-directory: android
         run: |
-          cd android
           chmod +x gradlew
-          ./gradlew assembleDebug
+          ./gradlew assembleRelease --no-daemon
 
-      - name: Rename APK
+      - name: Sign APK with Shopkey key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          mkdir -p release
-          cp android/app/build/outputs/apk/debug/app-debug.apk \
-            release/ShopKey.apk
+          set -e
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          UNSIGNED=$(ls android/app/build/outputs/apk/release/*.apk | head -1)
+          mkdir -p out
 
-      - name: Upload Final APK
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > shopkey.jks
+          else
+            echo "::warning::No keystore secrets found. Using a TEMPORARY key. Later builds will NOT install over this one. Add the 4 secrets for a permanent key."
+            KEYSTORE_PASSWORD=$(openssl rand -hex 12)
+            KEY_ALIAS=shopkey
+            KEY_PASSWORD=$KEYSTORE_PASSWORD
+            keytool -genkeypair -v -keystore shopkey.jks -alias "$KEY_ALIAS" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" \
+              -dname "CN=Shopkey, O=Shopkey, C=IN"
+          fi
+          export KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD
+
+          "$BT/zipalign" -p -f 4 "$UNSIGNED" out/aligned.apk
+          "$BT/apksigner" sign \
+            --ks shopkey.jks \
+            --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass env:KEYSTORE_PASSWORD \
+            --key-pass env:KEY_PASSWORD \
+            --out out/Shopkey.apk out/aligned.apk
+          "$BT/apksigner" verify --verbose out/Shopkey.apk
+          rm -f shopkey.jks out/aligned.apk
+
+      - name: Verify app name and package
+        run: |
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$BT/aapt2" dump badging out/Shopkey.apk | grep -E "^package:|application-label:" || true
+          "$BT/aapt2" dump badging out/Shopkey.apk | grep -q "application-label:'$APP_NAME'" \
+            || { echo "::error::App name is not $APP_NAME"; exit 1; }
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ShopKey-APK
-          path: release/ShopKey.apk
-          if-no-files-found: error
+          name: Shopkey-APK
+          path: out/Shopkey.apk
           retention-days: 30
           
