@@ -1,25 +1,28 @@
 
-name: ShopKey APK Build
+name: ShopKey Android APK
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
       - 'index.html'
+      - 'shopkey-logo.png'
       - '.github/workflows/build.yml'
+
+permissions:
+  contents: read
 
 jobs:
   build:
-    name: Build ShopKey Android APK
-    runs-on: ubuntu-latest
+    name: Build ShopKey
+    runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -33,13 +36,18 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Check App Files
+        run: |
+          test -f index.html
+          test -f shopkey-logo.png
+
       - name: Install Capacitor
         run: |
           npm init -y
-          npm install @capacitor/core@7 @capacitor/android@7
-          npm install -D @capacitor/cli@7
+          npm install @capacitor/core@7.4.3 @capacitor/android@7.4.3
+          npm install --save-dev @capacitor/cli@7.4.3
 
-      - name: Prepare ShopKey App
+      - name: Configure ShopKey
         run: |
           mkdir -p www
           cp index.html www/index.html
@@ -48,27 +56,74 @@ jobs:
           {
             "appId": "com.shopkey.app",
             "appName": "ShopKey",
-            "webDir": "www",
-            "bundledWebRuntime": false
+            "webDir": "www"
           }
           EOF
 
-      - name: Generate Android Project
+      - name: Create Android Project
         run: |
           npx cap add android
           npx cap sync android
 
-      - name: Build Debug APK
+      - name: Apply ShopKey Branding
+        run: |
+          RES=android/app/src/main/res
+
+          mkdir -p $RES/drawable-nodpi
+          mkdir -p $RES/mipmap-mdpi
+          mkdir -p $RES/mipmap-hdpi
+          mkdir -p $RES/mipmap-xhdpi
+          mkdir -p $RES/mipmap-xxhdpi
+          mkdir -p $RES/mipmap-xxxhdpi
+          mkdir -p $RES/mipmap-anydpi-v26
+
+          convert shopkey-logo.png -resize 432x432! \
+            $RES/drawable-nodpi/ic_launcher_foreground.png
+
+          for item in "mdpi 48" "hdpi 72" "xhdpi 96" \
+            "xxhdpi 144" "xxxhdpi 192"; do
+            set -- $item
+            convert shopkey-logo.png -resize "$2"x"$2"! \
+              "$RES/mipmap-$1/ic_launcher.png"
+            cp "$RES/mipmap-$1/ic_launcher.png" \
+              "$RES/mipmap-$1/ic_launcher_round.png"
+          done
+
+          cat > $RES/values/shopkey_icon.xml <<'EOF'
+          <resources>
+            <color name="shopkey_icon_bg">#0F766E</color>
+          </resources>
+          EOF
+
+          for icon in ic_launcher ic_launcher_round; do
+            cat > "$RES/mipmap-anydpi-v26/$icon.xml" <<EOF
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+            <background android:drawable="@color/shopkey_icon_bg"/>
+            <foreground android:drawable="@drawable/ic_launcher_foreground"/>
+          </adaptive-icon>
+          EOF
+          done
+
+          sed -i 's/<string name="app_name">[^<]*</<string name="app_name">ShopKey</' \
+            $RES/values/strings.xml
+
+      - name: Build ShopKey APK
         run: |
           cd android
           chmod +x gradlew
           ./gradlew assembleDebug
 
-      - name: Upload ShopKey APK
+      - name: Rename APK
+        run: |
+          mkdir -p release
+          cp android/app/build/outputs/apk/debug/app-debug.apk \
+            release/ShopKey.apk
+
+      - name: Upload Final APK
         uses: actions/upload-artifact@v4
         with:
           name: ShopKey-APK
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          path: release/ShopKey.apk
           if-no-files-found: error
           retention-days: 30
           
